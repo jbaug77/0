@@ -1,0 +1,84 @@
+name: Ngrok RDP Tunnel V2
+
+on: 
+  workflow_dispatch
+
+jobs:
+  rdp-access:
+    runs-on: windows-latest
+    steps:
+      - name: Download Ngrok
+        run: |
+          Invoke-WebRequest -Uri "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip" -OutFile "$env:USERPROFILE\ngrok.zip"
+          Expand-Archive -Path "$env:USERPROFILE\ngrok.zip" -DestinationPath "$env:USERPROFILE\" -Force
+          Remove-Item -Path "$env:USERPROFILE\ngrok.zip" -Force
+
+      - name: Enable RDP
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+          Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+
+      - name: Set RDP Credentials
+        run: |
+          $user = "V"
+          $password = ConvertTo-SecureString "Root123" -AsPlainText -Force
+          if (-not (Get-LocalUser -Name $user -ErrorAction SilentlyContinue)) {
+              New-LocalUser -Name $user -Password $password
+          }
+          Add-LocalGroupMember -Group "Administrators" -Member $user
+
+      - name: Start Ngrok with Region Retry
+        env:
+          NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+        run: |
+          # Set authtoken
+          & "$env:USERPROFILE\ngrok.exe" config add-authtoken $Env:NGROK_TOKEN
+
+          $maxRetries = 5
+          $retryCount = 0
+          $desiredRegion = "us-cal-1"
+          $tunnelUrl = $null
+
+          while ($retryCount -lt $maxRetries -and !$tunnelUrl) {
+              $retryCount++
+              # Start ngrok
+              Start-Process -NoNewWindow -FilePath "$env:USERPROFILE\ngrok.exe" -ArgumentList "tcp", "3389"
+              Start-Sleep -Seconds 10
+
+              # Cek tunnel info
+              try {
+                  $tunnelInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing).Content | ConvertFrom-Json
+                  $currentUrl = $tunnelInfo.tunnels[0].public_url
+                  
+                  if ($currentUrl -match $desiredRegion) {
+                      $tunnelUrl = $currentUrl
+                  } else {
+                      Stop-Process -Name "ngrok" -Force
+                      Start-Sleep -Seconds 2
+                  }
+              } catch {
+                  Stop-Process -Name "ngrok" -Force
+              }
+          }
+
+          # Jika setelah retry tetap gagal, buat tunnel default
+          if (!$tunnelUrl) {
+              Start-Process -NoNewWindow -FilePath "$env:USERPROFILE\ngrok.exe" -ArgumentList "tcp", "3389"
+              Start-Sleep -Seconds 10
+              $tunnelInfo = (Invoke-WebRequest -Uri "http://localhost:4040/api/tunnels" -UseBasicParsing).Content | ConvertFrom-Json
+              $tunnelUrl = $tunnelInfo.tunnels[0].public_url
+          }
+
+          # Output sederhana
+          Write-Output "=============================================="
+          Write-Output "🖥️ RDP BERHASIL DIBUAT!"
+          Write-Output "🚀 Endpoint: $tunnelUrl"
+          Write-Output "User: V"
+          Write-Output "Password: Root123"
+          Write-Output "=============================================="
+
+          # Simpan URL ke file
+          Set-Content -Path "$env:USERPROFILE\ngrok_tunnel_url.txt" -Value $tunnelUrl
+
+          # Pertahankan tunnel aktif
+          while ($true) { Start-Sleep -Seconds 60 }
