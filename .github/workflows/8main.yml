@@ -1,0 +1,60 @@
+name: Ngrok SSH Tunnel V2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ssh-tunnel:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup SSH Server
+        run: |
+          sudo apt update -qq 2>/dev/null
+          sudo apt install -y openssh-server >/dev/null 2>&1
+          sudo service ssh start
+          
+          # Set root password langsung
+          echo "root:Root123" | sudo chpasswd >/dev/null 2>&1
+          
+          # Konfigurasi untuk root access penuh
+          sudo sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+          sudo sed -i 's/PasswordAuthentication no/PasswordAuthentication yes/' /etc/ssh/sshd_config
+          sudo service ssh restart >/dev/null 2>&1
+
+      - name: Install Ngrok
+        run: |
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list >/dev/null
+          sudo apt update >/dev/null 2>&1 && sudo apt install -y ngrok >/dev/null 2>&1
+
+      - name: Run Ngrok Tunnel
+        env:
+          NGROK_TOKEN: ${{ secrets.NGROK_TOKEN }}
+        run: |
+          sudo service ssh restart >/dev/null 2>&1
+          ngrok config add-authtoken $NGROK_TOKEN >/dev/null 2>&1
+          ngrok tcp 22 --log=stdout > ngrok.log &
+          sleep 10
+          
+          # Dapatkan URL TCP langsung
+          TUNNEL_URL=$(curl -s localhost:4040/api/tunnels | jq -r '.tunnels[0].public_url')
+          HOST=$(echo $TUNNEL_URL | cut -d':' -f2 | sed 's/\///g')
+          PORT=$(echo $TUNNEL_URL | cut -d':' -f3)
+          
+          echo "=========================================="
+          echo "SSH TUNNEL CREATED SUCCESSFULLY"
+          echo "Host: $TUNNEL_URL"
+          echo "User: root"
+          echo "Password: Root123"
+          echo "SSH Command: ssh root@$HOST -p $PORT"
+          echo "=========================================="
+          
+          # Pertahankan tunnel tetap aktif
+          while true; do
+            if ! curl -s localhost:4040 >/dev/null; then
+              pkill ngrok
+              ngrok tcp 22 --log=stdout > ngrok.log &
+              sleep 10
+            fi
+            sleep 60
+          done
